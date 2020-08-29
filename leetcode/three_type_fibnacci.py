@@ -1,3 +1,4 @@
+# -- coding:UTF-8
 #!/usr/bin
 from cal_time import *
 
@@ -41,3 +42,17 @@ def fib3(n):
 fib1(35)
 fib2(35)
 fib3(35)
+
+# Steps
+# step 1: 把n-1个盘子从A经过C移动到B
+# step 2: 把第n个盘子从A移动到C
+# step 3: 把n-1个盘子从B经过A移动到C
+
+def hanoi(n, from_pole, through_pole, to_pole):
+    if n > 0:
+        hanoi(n-1, from_pole, to_pole, through_pole)
+        print('%s->%s' % (from_pole, to_pole))
+        hanoi(n-1, through_pole, from_pole, to_pole)
+
+
+hanoi(4, 'A', 'B', 'C')
