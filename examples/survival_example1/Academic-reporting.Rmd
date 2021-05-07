@@ -1,0 +1,479 @@
+---
+title: "Analysis for academic reporting"
+author: "Wenjun He"
+date: "`r format(Sys.Date(),'%d %B, %Y')`"
+
+output:
+  html_notebook:
+    toc: yes
+---
+# Background
+
+The report of this analysis refer to two articles:
+ - Prognostic and predictive value of a microRNA signature in adults
+with T-cell lymphoblastic lymphoma
+ - A CpG Methylation Classifier to Predict Relapse in Adults
+with T-Cell Lymphoblastic Lymphoma
+
+<br>
+
+# Step 1 - Data preprocessing
+```{r training_internal_testing and external set,echo=FALSE, warning=FALSE, message=FALSE}
+library("readxl")
+
+
+# training and internal test dataset
+training_internal_testing_path <- "/hewenjun/rstudio_work/zhenweipeng_version3/training-1-20201104.xlsx" 
+data_training_internal_testing <- read_excel(training_internal_testing_path)
+
+variables_to_remove <- c()
+for (i in 1:40){
+  var_remove <- paste("miR",i,"rank",sep = "-")
+  variables_to_remove <- c(variables_to_remove,var_remove)
+}
+
+variables_to_keep <- c()
+for (c in colnames(data_training_internal_testing)) {
+  if (! c %in% variables_to_remove){
+    variables_to_keep <- c(variables_to_keep,c)
+  }
+}
+data_training_internal_testing <- data_training_internal_testing[,variables_to_keep]
+
+# splitting into training set and interval validation set
+library(caret)
+set.seed(12)
+sample_value <-createDataPartition(y=data_training_internal_testing$Recurrence,p=0.7,list=FALSE)
+train_data <- data_training_internal_testing[sample_value, ]
+test_data <- data_training_internal_testing[-sample_value, ]
+
+
+# validation test dataset
+validation_data_path <- "/hewenjun/rstudio_work/zhenweipeng_version3/validation-20201224.xlsx" 
+external_data <- read_excel(validation_data_path)
+```
+
+# Step 2 - Lasso cox model to build a risk score using miR variables
+```{r lasso cox model,echo=FALSE, warning=FALSE, message=FALSE}
+mir_variable <- c()
+for (i in 1:40){
+  var <- paste("miR",i,sep = "-")
+  mir_variable <- c(mir_variable,var)
+}
+
+set.seed(8) # 12 1 can get 4 variables | 12 4 get 5 | 12 8 get 4 | 1 9 get 7
+cv.fit <- cv.glmnet(data.matrix(train_data[,mir_variable]), 
+                        Surv(as.numeric(as.matrix(train_data[,"RFS"])), as.numeric(as.matrix(train_data[,"Recurrence"]))), 
+                        family="cox", 
+                        type.measure="C" )
+
+lasso_cox_fit <- glmnet(data.matrix(train_data[,mir_variable]), 
+                            Surv(as.numeric(as.matrix(train_data[,"RFS"])), as.numeric(as.matrix(train_data[,"Recurrence"]))),
+                            family="cox")
+
+# Coefficients in lasso cox
+Coefficients <- coef(lasso_cox_fit, s = cv.fit$lambda.min)
+
+# Variables selected by lasso cox
+selected_variables <- c()
+Active.Index <- which(Coefficients != 0)
+Active.Coefficients <- Coefficients[Active.Index]
+for(j in mir_variable[Active.Index]){
+  selected_variables <- c(selected_variables, j)
+}
+selected_variables
+
+# coefficient plot of lasso cox
+plot(cv.fit$glmnet.fit,xvar = "lambda",label = T)
+abline(v=log(c(cv.fit$lambda.min,cv.fit$lambda.1se)),lty=2)
+
+# tiff(file = "2.1-lasso.tiff", width = 1000, height = 500)
+# plot(cv.fit$glmnet.fit,xvar = "lambda",label = T)
+# abline(v=log(c(cv.fit$lambda.min)),lty=2)
+# while (!is.null(dev.list()))  dev.off()
+
+# Cv plot of lasso cox
+plot(cv.fit)
+
+# tiff(file = "2.2-lasso.tiff", width = 1000, height = 500)
+# plot(cv.fit)
+# while (!is.null(dev.list()))  dev.off()
+
+# Risk score calculation: 
+# Risk_score = miR-1*0.0149204144+miR-6*-0.0921783831+miR-9*-0.0461641026+miR-40*0.0003417941
+train_data$risk_score <- train_data$`miR-1`*0.0149204144 + train_data$`miR-6`*-0.0921783831 + train_data$`miR-9`*-0.0461641026 + train_data$`miR-40`*0.0003417941
+
+test_data$risk_score <- test_data$`miR-1`*0.0149204144 + test_data$`miR-6`*-0.0921783831 + test_data$`miR-9`*-0.0461641026 + test_data$`miR-40`*0.0003417941
+
+external_data$risk_score <- external_data$`miR-1`*0.0149204144 + external_data$`miR-6`*-0.0921783831 + external_data$`miR-9`*-0.0461641026 + external_data$`miR-40`*0.0003417941
+```
+# Step 3 - Clinicopathological parameters of risk score
+```{r prepare risk score variable ,echo=FALSE, warning=FALSE, message=FALSE}
+# Using cut off the get the high risk and low risk
+# Traning data
+train.cut.RFS <- surv_cutpoint(train_data, time = "RFS", event = "Recurrence",
+   variables = c("risk_score"))
+summary(train.cut.RFS)
+plot(train.cut.RFS, "risk_score", palette = "npg")
+train.cut.RFS <- surv_categorize(train.cut.RFS)
+train_data$risk_score_cat <- train.cut.RFS$risk_score
+
+# Internal test data
+test.cut.RFS <- surv_cutpoint(test_data, time = "RFS", event = "Recurrence",
+   variables = c("risk_score"))
+summary(test.cut.RFS)
+plot(test.cut.RFS, "risk_score", palette = "npg")
+test.cut.RFS <- surv_categorize(test.cut.RFS)
+test_data$risk_score_cat <- test.cut.RFS$risk_score
+
+# External test data
+external.cut.RFS <- surv_cutpoint(external_data, time = "RFS", event = "Recurrence",
+   variables = c("risk_score"))
+summary(external.cut.RFS)
+plot(external.cut.RFS, "risk_score", palette = "npg")
+external.cut.RFS <- surv_categorize(external.cut.RFS)
+external_data$risk_score_cat <- external.cut.RFS$risk_score
+```
+
+```{r clinicopathological,echo=FALSE, warning=FALSE, message=FALSE}
+library(summarytools)
+# Training data
+st_options(plain.ascii = FALSE)
+var_factor <- c("Death","Recurrence","Chemotherapy","Gender","Age","Symptom","BMI","Size","Lymphnode","TBIL","ALT","GGT","CA199","CEA","Vascularinvasion","risk_score_cat")
+for (var in var_factor){
+  train_data[,var] <- as.factor(as.matrix(train_data[,var]))
+}
+dfSummary(train_data[,var_factor], valid.col = FALSE, graph.magnif = 0.75)
+train_data[,var_factor] %>% group_by(risk_score_cat) %>% dfSummary()
+
+# Test data
+for (var in var_factor){
+  test_data[,var] <- as.factor(as.matrix(test_data[,var]))
+}
+dfSummary(test_data[,var_factor], valid.col = FALSE, graph.magnif = 0.75)
+test_data[,var_factor] %>% group_by(risk_score_cat) %>% dfSummary()
+
+# External data
+for (var in var_factor){
+  external_data[,var] <- as.factor(as.matrix(external_data[,var]))
+}
+dfSummary(external_data[,var_factor], valid.col = FALSE, graph.magnif = 0.75)
+external_data[,var_factor] %>% group_by(risk_score_cat) %>% dfSummary()
+```
+```{r chi square test,echo=FALSE, warning=FALSE, message=FALSE}
+chiq_circulation <- function(var, dataset){
+  print(var)
+  mytable<-table(unlist(dataset[,var]),dataset$risk_score_cat)
+  print(addmargins(mytable,2)) 
+  print(prop.table(mytable,1),digits = 3)
+  print(chisq.test(mytable))
+  fisher.test(mytable)
+}
+
+# Training data
+print("----------------------------Training data----------------------------")
+for(var in var_factor){
+  chiq_circulation(var, train_data)
+}
+
+# Test data
+print("----------------------------Test data----------------------------")
+for(var in var_factor){
+  chiq_circulation(var, test_data)
+}
+
+# External data
+print("----------------------------External data----------------------------")
+for(var in var_factor){
+  chiq_circulation(var, external_data)
+}
+
+```
+
+# Step 4 - Validation for the risk score including: histogram, ROC, KM curves
+```{r histogram,echo=FALSE, warning=FALSE, message=FALSE}
+library(ggplot2)
+
+histogram_risk <- function(data_set){
+  data_set <- data_set[order(data_set$risk_score),]
+  p = ggplot()+
+  geom_histogram(aes(x=1:length(data_set$risk_score),y=data_set$risk_score,fill=data_set$Recurrence),stat='identity')+
+  theme_minimal()+
+  theme_classic()+
+  theme(legend.position=c(0.2,0.8),plot.title = element_text(hjust = 0.5), legend.title = element_blank())+
+  labs(title="Risk score for every patient", x="Weight", y="Risk score for four-miRNA-based classifier") +
+  scale_fill_discrete(labels = c("Recurrence", "Not Recurrence"))+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+         axis.line.x=element_blank())
+  print(p)
+  # tiff(file = "histgram-data.tiff", width = 1000, height = 500)
+  # print(p)
+  # while (!is.null(dev.list()))  dev.off()
+}
+
+# Training data
+histogram_risk(train_data)
+# Test data
+test_data$Recurrence <- as.factor(test_data$Recurrence)
+histogram_risk(test_data)
+# External data
+external_data$Recurrence <- as.factor(external_data$Recurrence)
+histogram_risk(external_data)
+```
+
+```{r KM,echo=FALSE, warning=FALSE, message=FALSE}
+generate_KM <- function(data_set){
+  data_set$Recurrence <- as.integer(data_set$Recurrence)
+res_cox<-coxph(Surv(RFS, Recurrence) ~risk_score_cat, data = data_set)
+p <- ggsurvplot(survfit(Surv(RFS, Recurrence) ~risk_score_cat, data = data_set), data = data_set, 
+           risk.table = TRUE,
+           conf.int = TRUE,
+           pval = TRUE,
+           surv.median.line = "hv",
+           pval.coord=c(45,0.65),
+           pval.size=4)
+p$plot = p$plot + 
+ggplot2::annotate("text",
+                    x = 50, 
+                    y = 0.85,
+                    label = paste("HR :",round(summary(res_cox)$conf.int[1],2))) + ggplot2::annotate("text",
+                  x = 50, 
+                  y = 0.75,
+                  label =paste("(","95%CI:",round(summary(res_cox)$conf.int[3],2),"-",round(summary(res_cox)$conf.int[4],2),")",sep = "")) + labs(title="RFS survival analysis")
+print(p)
+
+# tiff(file = "KM.tiff", width = 1000, height = 500)
+# print(p)
+# while (!is.null(dev.list()))  dev.off()
+
+}
+
+# Training data
+generate_KM(data_set = train_data)
+
+# Testing data
+generate_KM(data_set = test_data)
+
+# External data
+generate_KM(data_set = external_data)
+```
+
+```{r ROC,echo=FALSE, warning=FALSE, message=FALSE}
+library(timeROC)
+
+dd <- datadist(train_data)
+options(datadist="dd")
+
+generate_roc <- function(train_data){
+  dd <- datadist(train_data)
+  options(datadist="dd")
+  roc_lasso <- timeROC(T=train_data$RFS, delta = train_data$Recurrence, marker=train_data$risk_score, cause=2, weighting = "marginal", times = c(3,6,12), ROC = TRUE, iid = TRUE)
+  # confint(roc_lasso)
+  plot(roc_lasso, time=3, col = "red")
+  plot(roc_lasso, time=6, add=TRUE, col = "blue")
+  plot(roc_lasso, time=12,add=TRUE, col = "brown")
+  #plot(roc_lasso, time=24, add=TRUE, col = "cyan")
+  legend("bottomright",c("ROC at 3 months","ROC at 6 months","ROC at 12 months"),col=c("red","blue","brown"),lty=1,lwd=1,text.width = 0.2, cex=0.7)
+  
+  # tiff(file = "ROC.tiff", width = 500, height = 500)
+  # plot(roc_lasso, time=3, col = "red")
+  # plot(roc_lasso, time=6, add=TRUE, col = "blue")
+  # plot(roc_lasso, time=12,add=TRUE, col = "brown")
+  # legend("bottomright",c("ROC at 3 months","ROC at 6 months","ROC at 12 months"),col=c("red","blue","brown"),lty=1,lwd=1,text.width = 0.2, cex=0.7)
+  # while (!is.null(dev.list()))  dev.off()
+}
+
+generate_roc(train_data = train_data)
+generate_roc(train_data = test_data)
+generate_roc(train_data = external_data)
+```
+# Step 5 - model selection for RFS and OS
+```{r cox model evaluation,echo=FALSE, warning=FALSE, message=FALSE}
+# Merge three dataset
+my.variable.list <- c("OS","Death","Recurrence","RFS", "Chemotherapy", "Gender","Age", "Symptom", "BMI", "Size", "Lymphnode","TBIL","ALT","GGT","CA199","CEA","Vascularinvasion","risk_score")
+#train_data$risk_score_cat <- as.character(train_data$risk_score_cat)
+merge_data <- rbind(train_data[,my.variable.list], test_data[,my.variable.list])
+merge_data <- rbind(merge_data, external_data[, my.variable.list])
+
+# Get the cut off in total cases
+merge.cut.RFS <- surv_cutpoint(merge_data, time = "RFS", event = "Recurrence",
+   variables = c("risk_score"))
+plot(merge.cut.RFS, "risk_score", palette = "npg")
+merge.cut.RFS <- surv_categorize(merge.cut.RFS)
+merge_data$risk_score_cat <- merge.cut.RFS$risk_score
+
+
+merge_data$risk_score_cat <- as.integer(as.factor(merge_data$risk_score_cat))
+merge_data$risk_score_cat[merge_data$risk_score_cat==2] <- 0
+library(My.stepwise)
+my.variable.list.cox_to_integer <- c("Death","Recurrence","Chemotherapy", "Gender","Age", "Symptom", "BMI", "Size", "Lymphnode","TBIL","ALT","GGT","CA199","CEA","Vascularinvasion")
+for(var in my.variable.list){
+  merge_data[,var] <- as.integer(as.matrix(unlist(merge_data[,var])))
+}
+
+my.variable.list.cox <- c("Chemotherapy", "Gender","Age", "Symptom", "BMI", "Size", "Lymphnode","TBIL","ALT","GGT","CA199","CEA","Vascularinvasion","risk_score_cat")
+# RFS model
+My.stepwise.coxph(Time = "RFS", Status = "Recurrence", variable.list = my.variable.list.cox, data = merge_data)
+# OS model
+My.stepwise.coxph(Time = "OS", Status = "Death", variable.list = my.variable.list.cox, data = merge_data)
+```
+
+# Step 6 - Prediction of the benefits from Chemotherapy
+```{r KM curves,echo=FALSE, warning=FALSE, message=FALSE}
+generate_KM_Chemotherapy_RFS <- function(data_set){
+  data_set$Recurrence <- as.integer(data_set$Recurrence)
+res_cox<-coxph(Surv(RFS, Recurrence) ~Chemotherapy, data = data_set)
+p <- ggsurvplot(survfit(Surv(RFS, Recurrence) ~Chemotherapy, data = data_set), data = data_set, 
+           risk.table = TRUE,
+           conf.int = TRUE,
+           pval = TRUE,
+           surv.median.line = "hv",
+           pval.coord=c(32,0.65),
+           pval.size=4)
+p$plot = p$plot + 
+ggplot2::annotate("text",
+                    x = 35, 
+                    y = 0.75,
+                    label = paste("HR :",round(summary(res_cox)$conf.int[1],2))) + ggplot2::annotate("text",
+                  x = 35, 
+                  y = 0.70,
+                  label =paste("(","95%CI:",round(summary(res_cox)$conf.int[3],2),"-",round(summary(res_cox)$conf.int[4],2),")",sep = "")) + labs(title="RFS survival analysis")
+print(p)
+
+# tiff(file = "KM_RFS.tiff", width = 1000, height = 500)
+# print(p)
+# while (!is.null(dev.list()))  dev.off()
+
+}
+
+generate_KM_Chemotherapy_OS <- function(data_set){
+  data_set$Death <- as.integer(data_set$Death)
+res_cox<-coxph(Surv(OS, Death) ~Chemotherapy, data = data_set)
+p <- ggsurvplot(survfit(Surv(OS, Death) ~Chemotherapy, data = data_set), data = data_set, 
+           risk.table = TRUE,
+           conf.int = TRUE,
+           pval = TRUE,
+           surv.median.line = "hv",
+           pval.coord=c(32,0.65),
+           pval.size=4)
+p$plot = p$plot + 
+ggplot2::annotate("text",
+                    x = 35, 
+                    y = 0.75,
+                    label = paste("HR :",round(summary(res_cox)$conf.int[1],2))) + ggplot2::annotate("text",
+                  x = 35, 
+                  y = 0.70,
+                  label =paste("(","95%CI:",round(summary(res_cox)$conf.int[3],2),"-",round(summary(res_cox)$conf.int[4],2),")",sep = "")) + labs(title="OS survival analysis")
+print(p)
+# tiff(file = "KM_OS.tiff", width = 1000, height = 500)
+# print(p)
+# while (!is.null(dev.list()))  dev.off()
+
+}
+
+# RFS
+# All cases
+generate_KM_Chemotherapy_RFS(data_set = merge_data)
+# All cases + miRNA-defined-low-risk
+generate_KM_Chemotherapy_RFS(data_set = merge_data[merge_data$risk_score_cat==0,])
+# All cases + miRNA-defined-high-risk
+generate_KM_Chemotherapy_RFS(data_set = merge_data[merge_data$risk_score_cat==1,])
+
+# OS
+# All cases
+generate_KM_Chemotherapy_OS(data_set = merge_data)
+# All cases + miRNA-defined-low-risk
+generate_KM_Chemotherapy_OS(data_set = merge_data[merge_data$risk_score_cat==0,])
+# All cases + miRNA-defined-high-risk
+generate_KM_Chemotherapy_OS(data_set = merge_data[merge_data$risk_score_cat==1,])
+```
+
+```{r forest plot,echo=FALSE, warning=FALSE, message=FALSE}
+library(forestplot)
+
+cochrane_from_rmeta <- 
+  structure(list(
+    mean  = c(NA,NA,0.55, NA,0.56, 0.62,NA,0.68,NA,0.57,0.82), 
+    lower = c(NA,NA,0.44,NA,0.32,0.48,NA,0.54,NA,0.33,0.63),
+    upper = c(NA,NA,0.7,NA,0.98,0.8,NA,0.86,NA,0.99,1.07)),
+    .Names = c("mean", "lower", "upper"), 
+    row.names = c(NA, -11L), 
+    class = "data.frame")
+
+tabletext <- cbind(
+  c("Subgroup", "RFS", "All cases", "Four-miRNA-based", 
+    "  Low risk", "  High risk", "OS", "All cases", "Four-miRNA-based", 
+    "  Low risk", "  High risk"),
+  c("End point", " ", "0.55(0.44-0.7)", " ", 
+    "0.56(0.32-0.98)", "0.62(0.48-0.8)", " ", "0.68(0.54-0.86)", " ", 
+    "0.57(0.33-0.99)", "0.82(0.63-1.07)"),
+  c("P value", " ", "<0.0001", " ", 
+    "0.037", "0.00011", " ", "0.0011", " ", 
+    "0.042", "0.14"))
+forestplot(tabletext, 
+           graph.pos = 2,
+           cochrane_from_rmeta,new_page = TRUE,
+           #is.summary = c(TRUE,TRUE,rep(FALSE,8),TRUE),
+           clip = c(0.1,2.5), 
+           xlog = TRUE, 
+           col = fpColors(box = "royalblue",
+                          line = "darkblue",
+                          summary = "royalblue"))
+# tiff(file = "forestplot.tiff", width = 500, height = 500)
+# forestplot(tabletext, 
+#            graph.pos = 2,
+#            cochrane_from_rmeta,new_page = TRUE,
+#            #is.summary = c(TRUE,TRUE,rep(FALSE,8),TRUE),
+#            clip = c(0.1,2.5), 
+#            xlog = TRUE, 
+#            col = fpColors(box = "royalblue",
+#                           line = "darkblue",
+#                           summary = "royalblue"))
+# while (!is.null(dev.list()))  dev.off()
+```
+# Step 7 - Nomogram plot
+```{r cox in training set,echo=FALSE, warning=FALSE, message=FALSE}
+library(survival)
+library(rms)
+
+
+my.variable.list.train <- c("OS","Death","Recurrence","RFS", "Chemotherapy", "Gender","Age", "Symptom", "BMI", "Size", "Lymphnode","TBIL","ALT","GGT","CA199","CEA","Vascularinvasion","risk_score_cat")
+training_cox_data <- train_data[,my.variable.list.train]
+
+training_cox_data$risk_score_cat <- as.integer(as.factor(training_cox_data$risk_score_cat))
+training_cox_data$risk_score_cat[training_cox_data$risk_score_cat==2] <- 0
+
+my.variable.list.cox_to_integer <- c("Death","Recurrence","Chemotherapy", "Gender","Age", "Symptom", "BMI", "Size", "Lymphnode","TBIL","ALT","GGT","CA199","CEA","Vascularinvasion")
+for(var in my.variable.list.cox_to_integer){
+  training_cox_data[,var] <- as.integer(as.matrix(unlist(training_cox_data[,var])))
+}
+
+my.variable.list.cox <- c("Chemotherapy", "Gender","Age", "Symptom", "BMI", "Size", "Lymphnode","TBIL","ALT","GGT","CA199","CEA","Vascularinvasion","risk_score_cat")
+My.stepwise.coxph(Time = "RFS", Status = "Recurrence", variable.list = my.variable.list.cox, data = training_cox_data)
+
+training_cox_data$risk_score_cat <- as.factor(training_cox_data$risk_score_cat)
+training_cox_data$Chemotherapy <- as.factor(training_cox_data$Chemotherapy)
+training_cox_data$CEA <- as.factor(training_cox_data$CEA)
+training_cox_data$Age <- as.factor(training_cox_data$Age)
+
+```
+
+```{r Nomogram plot,echo=FALSE, warning=FALSE, message=FALSE}
+dd<-datadist(training_cox_data)
+options(datadist="dd")
+f <- cph(Surv(RFS, Recurrence)~risk_score_cat+Chemotherapy+CEA+Age, data = training_cox_data, x=TRUE, y=TRUE, surv = TRUE)
+survival <- Survival(f)
+survival1 <- function(x)survival(3,x)
+survival2 <- function(x)survival(6,x)
+survival3 <- function(x)survival(12,x)
+nom2 <- nomogram(f, fun = list(survival1, survival2,survival3),
+                fun.at = c(0.01, seq(0.1,0.9,by=0.05), 0.99),
+                funlabel = c('3 months survival','6 months survival', '1 year survival'))
+plot(nom2)
+
+# tiff(file = "nomogram.tiff", width = 800, height = 500)
+# plot(nom2)
+# while (!is.null(dev.list()))  dev.off()
+```
